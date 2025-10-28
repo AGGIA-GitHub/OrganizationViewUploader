@@ -9,7 +9,7 @@
 
   <PropertyGroup>
     <Name>OrganizationViewUploader</Name>
-    <ProjectGuid>ca9e3406-b91c-4a86-a7fd-c4734b2b0a31</ProjectGuid>
+    <ProjectGuid>bcb6437d-717d-4079-b18d-8a4fe7fb4cf2</ProjectGuid>
     <OutputPath>$(MSBuildThisFileDirectory)out\controls</OutputPath>
   </PropertyGroup>
 

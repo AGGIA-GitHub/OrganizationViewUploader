@@ -6,6 +6,9 @@ type DataSet = ComponentFramework.PropertyTypes.DataSet;
 
 export class OrganizationViewSync implements ComponentFramework.ReactControl<IInputs, IOutputs> {
     private notifyOutputChanged: () => void;
+    private context: ComponentFramework.Context<IInputs>;
+    private width: number;
+    private height: number;
 
     /**
      * Empty constructor.
@@ -27,6 +30,9 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
         state: ComponentFramework.Dictionary
     ): void {
         this.notifyOutputChanged = notifyOutputChanged;
+        this.context = context;
+        this.width = context.mode.allocatedWidth;
+        this.height = context.mode.allocatedHeight;
     }
 
     /**
@@ -35,10 +41,87 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
      * @returns ReactElement root react element for the control
      */
     public updateView(context: ComponentFramework.Context<IInputs>): React.ReactElement {
-        const props: IHelloWorldProps = { name: 'Power Apps' };
-        return React.createElement(
-            HelloWorld, props
-        );
+        this.context = context;
+        this.width = context.mode.allocatedWidth;
+        this.height = context.mode.allocatedHeight;
+        
+        const props: IHelloWorldProps = { 
+            onFileUpload: this.handleFileUpload.bind(this),
+            width: this.width,
+            height: this.height
+        };
+        
+        return React.createElement(HelloWorld, props);
+    }
+
+    /**
+     * Handle file upload from the button
+     */
+    private async handleFileUpload(file: File): Promise<Record<string, unknown>[]> {
+        console.log('File selected:', file.name, 'Size:', file.size, 'Type:', file.type);
+        
+        try {
+            const text = await file.text();
+            const extension = file.name.split('.').pop()?.toLowerCase();
+            
+            let data: Record<string, unknown>[] = [];
+            
+            if (extension === 'csv') {
+                data = this.parseCSV(text);
+            } else {
+                // For now, show alert that only CSV is supported
+                void this.context.navigation.openAlertDialog({
+                    text: 'Currently only CSV files are supported. XLSX support coming soon!',
+                    confirmButtonLabel: "OK"
+                });
+                return [];
+            }
+            
+            console.log('Parsed data:', data);
+            
+            // Show success notification
+            void this.context.navigation.openAlertDialog({
+                text: `File "${file.name}" loaded successfully! ${data.length} rows found.`,
+                confirmButtonLabel: "OK"
+            });
+            
+            return data;
+            
+        } catch (error) {
+            console.error('Error processing file:', error);
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            void this.context.navigation.openAlertDialog({
+                text: `Error processing file: ${errorMessage}`,
+                confirmButtonLabel: "OK"
+            });
+            return [];
+        }
+    }
+    
+    /**
+     * Parse CSV file content
+     */
+    private parseCSV(text: string): Record<string, unknown>[] {
+        const lines = text.split('\n').filter(line => line.trim());
+        if (lines.length === 0) return [];
+        
+        // Parse header
+        const headers = lines[0].split(',').map(h => h.trim());
+        
+        // Parse data rows
+        const data: Record<string, unknown>[] = [];
+        for (let i = 1; i < lines.length; i++) {
+            const values = lines[i].split(',');
+            const row: Record<string, unknown> = {};
+            
+            headers.forEach((header, index) => {
+                row[header] = values[index]?.trim() || '';
+            });
+            
+            data.push(row);
+        }
+        
+        return data;
     }
 
     /**
