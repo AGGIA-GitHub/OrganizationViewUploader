@@ -213,13 +213,13 @@ export class HelloWorld extends React.Component<IHelloWorldProps, IHelloWorldSta
             
             if (status === 'synced') {
               color = '#107C10';
-              text = '✓ Synced';
+              text = 'Synced';
             } else if (status === 'not-synced') {
               color = '#D83B01';
-              text = '✗ Not Synced';
+              text = 'Not Synced';
             } else if (status === 'modified') {
               color = '#FF8C00';
-              text = '⚠ Modified';
+              text = 'Modified';
             }
             
             return <span style={{ color, fontWeight: 'bold' }}>{text}</span>;
@@ -230,14 +230,15 @@ export class HelloWorld extends React.Component<IHelloWorldProps, IHelloWorldSta
         <Column dataField="First Name" caption="First Name" width={120} />
         <Column dataField="Last Name" caption="Last Name" width={120} />
         <Column dataField="Business  Email Information Email Address" caption="Email" width={250} />
-        <Column dataField="Manager" caption="Manager" width={150} />
-        <Column dataField="Manager User Sys ID" caption="Manager ID" width={100} />
+        <Column dataField="Position Title" caption="Position Title" width={180} />
+        <Column dataField="Manager Name" caption="Manager Name" width={150} />
+        <Column dataField="Manager Global ID" caption="Manager Global ID" width={140} />
         <Scrolling mode="virtual" />
         {/* <Paging enabled={false} /> */}
         <FilterRow visible={true} />
         <HeaderFilter visible={true} />
         <Summary>
-          <TotalItem column="Status" summaryType="count" />
+          <TotalItem column="syncStatus" summaryType="count" />
         </Summary>
       </DataGrid>
       </div>

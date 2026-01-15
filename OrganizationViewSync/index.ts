@@ -1,6 +1,7 @@
 import { IInputs, IOutputs } from "./generated/ManifestTypes";
 import { HelloWorld, IHelloWorldProps } from "./HelloWorld";
 import * as React from "react";
+import * as Papa from 'papaparse';
 import * as XLSX from 'xlsx';
 
 // ============================================================================
@@ -8,18 +9,36 @@ import * as XLSX from 'xlsx';
 // ============================================================================
 
 /**
- * CSV Column names (exact match required, including spaces)
+ * CSV Column names (exact match required unless alias mapping applies)
  */
 const CSV_COLUMNS = {
     GLOBAL_ID: 'Global ID',
     FIRST_NAME: 'First Name',
     LAST_NAME: 'Last Name',
     EMAIL: 'Business  Email Information Email Address', // NOTE: TWO spaces between "Business" and "Email"
-    MANAGER_GLOBAL_ID: 'Manager User Sys ID',
-    MANAGER_NAME: 'Manager',
-    OPERATING_ENTITY: 'Operating Entity',
-    DEVICE_USER: 'Device User'
+    POSITION_TITLE: 'Position Title',
+    MANAGER_GLOBAL_ID: 'Manager Global ID',
+    MANAGER_NAME: 'Manager Name'
 } as const;
+
+const CSV_COLUMN_ALIASES: Record<keyof typeof CSV_COLUMNS, string[]> = {
+    GLOBAL_ID: [CSV_COLUMNS.GLOBAL_ID],
+    FIRST_NAME: [CSV_COLUMNS.FIRST_NAME],
+    LAST_NAME: [CSV_COLUMNS.LAST_NAME],
+    EMAIL: [CSV_COLUMNS.EMAIL],
+    POSITION_TITLE: [CSV_COLUMNS.POSITION_TITLE],
+    MANAGER_GLOBAL_ID: [CSV_COLUMNS.MANAGER_GLOBAL_ID, 'Manager User Sys ID'],
+    MANAGER_NAME: [CSV_COLUMNS.MANAGER_NAME, 'Manager']
+};
+
+const REQUIRED_COLUMNS: (keyof typeof CSV_COLUMNS)[] = [
+    'GLOBAL_ID',
+    'FIRST_NAME',
+    'LAST_NAME',
+    'EMAIL',
+    'POSITION_TITLE',
+    'MANAGER_GLOBAL_ID'
+];
 
 /**
  * Dataverse entity and field names
@@ -34,6 +53,7 @@ const DV_CONFIG = {
         LAST_NAME: 'ag_lastname',
         FULL_NAME: 'ag_fullname',
         EMAIL: 'ag_primaryemail',
+        ROLE: 'ag_role',
         MANAGER_GLOBAL_ID: 'ag_managerglobalid',
         MANAGER_LOOKUP: 'ag_manager',
         MANAGER_LOOKUP_VALUE: '_ag_manager_value'
@@ -54,6 +74,7 @@ interface DataverseRecord {
     ag_lastname: string;
     ag_fullname: string;
     ag_primaryemail: string;
+    ag_role: string;
     ag_managerglobalid: string;
     ag_managerid: string; // Lookup ID if manager relationship is set
 }
@@ -66,13 +87,21 @@ interface EmployeeRecord extends Record<string, unknown> {
     'First Name': string;
     'Last Name': string;
     'Business  Email Information Email Address': string;
-    'Manager User Sys ID': string;
-    'Manager': string;
-    'Operating Entity': string;
-    'Device User': string;
+    'Position Title': string;
+    'Manager Global ID': string;
+    'Manager Name': string;
     syncStatus?: 'synced' | 'not-synced' | 'modified';
     dataverseId?: string;
 }
+
+type ColumnKey = keyof typeof CSV_COLUMNS;
+type ColumnMap = Record<ColumnKey, string | null>;
+
+interface ParseResult {
+    records: Record<string, unknown>[];
+    headers: string[];
+}
+
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -120,6 +149,107 @@ function createFullName(firstName: string, lastName: string): string {
     return `${first} ${last}`.trim();
 }
 
+function buildColumnMap(headers: string[]): ColumnMap {
+    const normalizedHeaders = headers.map(header => header.trim());
+    const columnMap = {} as ColumnMap;
+
+    (Object.keys(CSV_COLUMNS) as ColumnKey[]).forEach((key) => {
+        const aliases = CSV_COLUMN_ALIASES[key];
+        const match = normalizedHeaders.find(header => aliases.includes(header)) ?? null;
+        columnMap[key] = match;
+    });
+
+    return columnMap;
+}
+
+function validateHeaders(headers: string[], columnMap: ColumnMap): { errors: string[]; warnings: string[] } {
+    const errors: string[] = [];
+    const warnings: string[] = [];
+    const normalizedHeaders = headers.map(header => header.trim()).filter(header => header);
+
+    const duplicateHeaders = normalizedHeaders.filter((header, index) => normalizedHeaders.indexOf(header) !== index);
+    if (duplicateHeaders.length > 0) {
+        const uniqueDuplicates = Array.from(new Set(duplicateHeaders));
+        errors.push(`Duplicate column names detected: ${uniqueDuplicates.join(', ')}`);
+    }
+
+    const missingRequired = REQUIRED_COLUMNS.filter((key) => !columnMap[key]);
+    if (missingRequired.length > 0) {
+        errors.push(`Missing required columns: ${missingRequired.map(key => CSV_COLUMNS[key]).join(', ')}`);
+    }
+
+    const optionalMissing = (Object.keys(CSV_COLUMNS) as ColumnKey[])
+        .filter((key) => !REQUIRED_COLUMNS.includes(key))
+        .filter((key) => !columnMap[key]);
+    if (optionalMissing.length > 0) {
+        warnings.push(`Optional columns missing: ${optionalMissing.map(key => CSV_COLUMNS[key]).join(', ')}`);
+    }
+
+    (Object.keys(CSV_COLUMNS) as ColumnKey[]).forEach((key) => {
+        const mappedHeader = columnMap[key];
+        if (mappedHeader && mappedHeader !== CSV_COLUMNS[key]) {
+            warnings.push(`Using alias "${mappedHeader}" for "${CSV_COLUMNS[key]}"`);
+        }
+    });
+
+    return { errors, warnings };
+}
+
+function getColumnValue(record: Record<string, unknown>, columnMap: ColumnMap, key: ColumnKey): string {
+    const column = columnMap[key];
+    if (!column) return '';
+    return getStringValue(record[column]);
+}
+
+function normalizeRecords(records: Record<string, unknown>[], columnMap: ColumnMap): EmployeeRecord[] {
+    return records.map((record) => ({
+        [CSV_COLUMNS.GLOBAL_ID]: getColumnValue(record, columnMap, 'GLOBAL_ID'),
+        [CSV_COLUMNS.FIRST_NAME]: getColumnValue(record, columnMap, 'FIRST_NAME'),
+        [CSV_COLUMNS.LAST_NAME]: getColumnValue(record, columnMap, 'LAST_NAME'),
+        [CSV_COLUMNS.EMAIL]: getColumnValue(record, columnMap, 'EMAIL'),
+        [CSV_COLUMNS.POSITION_TITLE]: getColumnValue(record, columnMap, 'POSITION_TITLE'),
+        [CSV_COLUMNS.MANAGER_GLOBAL_ID]: getColumnValue(record, columnMap, 'MANAGER_GLOBAL_ID'),
+        [CSV_COLUMNS.MANAGER_NAME]: getColumnValue(record, columnMap, 'MANAGER_NAME')
+    }));
+}
+
+function validateRecords(records: EmployeeRecord[]): string[] {
+    const errors: string[] = [];
+
+    if (records.length > 500) {
+        errors.push(`Row limit exceeded: ${records.length} records (max 500).`);
+    }
+
+    const missingIds: number[] = [];
+    const seen = new Map<string, number>();
+    const duplicates = new Set<string>();
+
+    records.forEach((record, index) => {
+        const globalId = getStringValue(record[CSV_COLUMNS.GLOBAL_ID]);
+        if (!hasValue(globalId)) {
+            missingIds.push(index + 2);
+            return;
+        }
+        if (seen.has(globalId)) {
+            duplicates.add(globalId);
+        } else {
+            seen.set(globalId, index + 2);
+        }
+    });
+
+    if (missingIds.length > 0) {
+        const sample = missingIds.slice(0, 15).join(', ');
+        errors.push(`Missing Global ID in rows: ${sample}${missingIds.length > 15 ? ', ...' : ''}`);
+    }
+
+    if (duplicates.size > 0) {
+        const sample = Array.from(duplicates).slice(0, 15).join(', ');
+        errors.push(`Duplicate Global ID values: ${sample}${duplicates.size > 15 ? ', ...' : ''}`);
+    }
+
+    return errors;
+}
+
 // ============================================================================
 // MAIN CONTROL CLASS
 // ============================================================================
@@ -131,6 +261,7 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
     private height: number;
     private dataverseRecords = new Map<string, DataverseRecord>();
     private csvRecords: EmployeeRecord[] = [];
+    private csvColumnMap: ColumnMap | null = null;
 
     /**
      * Empty constructor.
@@ -187,13 +318,13 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
             onProgress(10, 'Reading file...');
             
             const extension = file.name.split('.').pop()?.toLowerCase();
-            let data: Record<string, unknown>[] = [];
-            
+            let parseResult: ParseResult;
+
             if (extension === 'csv') {
                 const text = await file.text();
-                data = this.parseCSV(text);
+                parseResult = this.parseCSV(text);
             } else if (extension === 'xlsx' || extension === 'xls') {
-                data = await this.parseXLSX(file);
+                parseResult = await this.parseXLSX(file);
             } else {
                 void this.context.navigation.openAlertDialog({
                     text: 'Unsupported file format. Please upload CSV, XLSX, or XLS file.',
@@ -201,8 +332,48 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
                 });
                 return [];
             }
-            
-            onProgress(40, `Parsed ${data.length} records from file`);
+
+            if (parseResult.records.length === 0) {
+                void this.context.navigation.openAlertDialog({
+                    text: 'No data rows found in the uploaded file.',
+                    confirmButtonLabel: "OK"
+                });
+                this.csvRecords = [];
+                this.csvColumnMap = null;
+                return [];
+            }
+
+            const columnMap = buildColumnMap(parseResult.headers);
+            const headerValidation = validateHeaders(parseResult.headers, columnMap);
+            if (headerValidation.errors.length > 0) {
+                void this.context.navigation.openAlertDialog({
+                    text: `Invalid template:\n\n${headerValidation.errors.join('\n')}`,
+                    confirmButtonLabel: "OK"
+                });
+                this.csvRecords = [];
+                this.csvColumnMap = null;
+                return [];
+            }
+
+            if (headerValidation.warnings.length > 0) {
+                console.warn('Template warnings:', headerValidation.warnings);
+            }
+
+            const normalizedRecords = normalizeRecords(parseResult.records, columnMap);
+            const recordErrors = validateRecords(normalizedRecords);
+            if (recordErrors.length > 0) {
+                void this.context.navigation.openAlertDialog({
+                    text: `Data validation failed:\n\n${recordErrors.join('\n')}`,
+                    confirmButtonLabel: "OK"
+                });
+                this.csvRecords = [];
+                this.csvColumnMap = null;
+                return [];
+            }
+
+            this.csvColumnMap = columnMap;
+
+            onProgress(40, `Parsed ${normalizedRecords.length} records from file`);
             
             // Fetch existing records from Dataverse
             onProgress(50, 'Fetching existing records from Dataverse...');
@@ -212,7 +383,7 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
             
             // Compare and add sync status
             onProgress(85, 'Comparing data...');
-            const enrichedData = this.addSyncStatus(data as EmployeeRecord[]);
+            const enrichedData = this.addSyncStatus(normalizedRecords);
             
             // Store CSV records for synchronization
             this.csvRecords = enrichedData;
@@ -223,7 +394,7 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
             const modifiedCount = enrichedData.filter(r => r.syncStatus === 'modified').length;
             
             void this.context.navigation.openAlertDialog({
-                text: `File loaded successfully!\n\nTotal: ${data.length}\nSynced: ${syncedCount}\nNot Synced: ${notSyncedCount}\nModified: ${modifiedCount}`,
+                text: `File loaded successfully!\n\nTotal: ${normalizedRecords.length}\nSynced: ${syncedCount}\nNot Synced: ${notSyncedCount}\nModified: ${modifiedCount}`,
                 confirmButtonLabel: "OK"
             });
             
@@ -236,6 +407,8 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
                 text: `Error: ${errorMessage}`,
                 confirmButtonLabel: "OK"
             });
+            this.csvRecords = [];
+            this.csvColumnMap = null;
             return [];
         }
     }
@@ -258,26 +431,34 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
                         <attribute name="${DV_CONFIG.FIELDS.LAST_NAME}" />
                         <attribute name="${DV_CONFIG.FIELDS.FULL_NAME}" />
                         <attribute name="${DV_CONFIG.FIELDS.EMAIL}" />
+                        <attribute name="${DV_CONFIG.FIELDS.ROLE}" />
                         <attribute name="${DV_CONFIG.FIELDS.MANAGER_GLOBAL_ID}" />
                         <attribute name="${DV_CONFIG.FIELDS.MANAGER_LOOKUP}" />
                     </entity>
                 </fetch>`;
             
             const options = `?fetchXml=${encodeURIComponent(fetchXml)}`;
-            const result = await this.context.webAPI.retrieveMultipleRecords(DV_CONFIG.ENTITY_NAME, options);
+            let result = await this.context.webAPI.retrieveMultipleRecords(DV_CONFIG.ENTITY_NAME, options, 500);
+            const entities = [...result.entities];
+
+            while (result.nextLink) {
+                result = await this.context.webAPI.retrieveMultipleRecords(DV_CONFIG.ENTITY_NAME, result.nextLink, 500);
+                entities.push(...result.entities);
+            }
             
-            console.log(`\n✅ API returned ${result.entities.length} records`);
+            console.log(`\n✅ API returned ${entities.length} records`);
             
             // Log sample raw entities
-            if (result.entities.length > 0) {
+            if (entities.length > 0) {
                 console.log('\n📋 Sample RAW entities from API (first 3):');
-                result.entities.slice(0, 3).forEach((entity, idx) => {
+                entities.slice(0, 3).forEach((entity, idx) => {
                     console.log(`\n  [${idx + 1}]`, {
                         id: String(entity[DV_CONFIG.FIELDS.ID]),
                         globalId: String(entity[DV_CONFIG.FIELDS.GLOBAL_ID]),
                         firstName: String(entity[DV_CONFIG.FIELDS.FIRST_NAME] ?? ''),
                         lastName: String(entity[DV_CONFIG.FIELDS.LAST_NAME] ?? ''),
                         email: String(entity[DV_CONFIG.FIELDS.EMAIL] ?? ''),
+                        role: String(entity[DV_CONFIG.FIELDS.ROLE] ?? ''),
                         managerGlobalId: String(entity[DV_CONFIG.FIELDS.MANAGER_GLOBAL_ID] ?? ''),
                         managerLookupValue: String(entity[DV_CONFIG.FIELDS.MANAGER_LOOKUP_VALUE] ?? '')
                     });
@@ -289,7 +470,7 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
             let stored = 0;
             let skipped = 0;
             
-            result.entities.forEach((entity: ComponentFramework.WebApi.Entity) => {
+            entities.forEach((entity: ComponentFramework.WebApi.Entity) => {
                 const globalId = getStringValue(entity[DV_CONFIG.FIELDS.GLOBAL_ID]);
                 
                 if (!hasValue(globalId)) {
@@ -311,6 +492,7 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
                     ag_lastname: getStringValue(entity[DV_CONFIG.FIELDS.LAST_NAME]),
                     ag_fullname: getStringValue(entity[DV_CONFIG.FIELDS.FULL_NAME]),
                     ag_primaryemail: getStringValue(entity[DV_CONFIG.FIELDS.EMAIL]),
+                    ag_role: getStringValue(entity[DV_CONFIG.FIELDS.ROLE]),
                     ag_managerglobalid: getStringValue(entity[DV_CONFIG.FIELDS.MANAGER_GLOBAL_ID]),
                     ag_managerid: managerLookupId
                 });
@@ -333,6 +515,7 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
                         firstName: value.ag_firstname,
                         lastName: value.ag_lastname,
                         email: value.ag_primaryemail,
+                        role: value.ag_role,
                         managerGlobalId: value.ag_managerglobalid,
                         managerLookupId: value.ag_managerid
                     });
@@ -370,6 +553,7 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
             console.log('   First Name:', records[0][CSV_COLUMNS.FIRST_NAME]);
             console.log('   Last Name:', records[0][CSV_COLUMNS.LAST_NAME]);
             console.log('   Email:', records[0][CSV_COLUMNS.EMAIL]);
+            console.log('   Position Title:', records[0][CSV_COLUMNS.POSITION_TITLE]);
             console.log('   Manager Global ID:', records[0][CSV_COLUMNS.MANAGER_GLOBAL_ID]);
         }
         
@@ -382,6 +566,7 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
                 console.log('      Dataverse ID:', value.ag_organizationviewid);
                 console.log('      Name:', `${value.ag_firstname} ${value.ag_lastname}`);
                 console.log('      Email:', value.ag_primaryemail || '(empty)');
+                console.log('      Role:', value.ag_role || '(empty)');
                 console.log('      Manager Global ID:', value.ag_managerglobalid || '(empty)');
                 console.log('      Manager Lookup Set:', value.ag_managerid ? 'YES' : 'NO');
             });
@@ -430,12 +615,14 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
             const csvFirstName = getStringValue(record[CSV_COLUMNS.FIRST_NAME]);
             const csvLastName = getStringValue(record[CSV_COLUMNS.LAST_NAME]);
             const csvEmail = getEmailValue(record[CSV_COLUMNS.EMAIL]);
+            const csvPositionTitle = getStringValue(record[CSV_COLUMNS.POSITION_TITLE]);
             const csvManagerGlobalId = getStringValue(record[CSV_COLUMNS.MANAGER_GLOBAL_ID]);
             
             // Extract and normalize DV values
             const dvFirstName = getStringValue(dvRecord.ag_firstname);
             const dvLastName = getStringValue(dvRecord.ag_lastname);
             const dvEmail = getEmailValue(dvRecord.ag_primaryemail);
+            const dvRole = getStringValue(dvRecord.ag_role);
             const dvManagerGlobalId = getStringValue(dvRecord.ag_managerglobalid);
             const dvHasManagerLookup = hasValue(dvRecord.ag_managerid);
             
@@ -443,6 +630,7 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
             const firstNameMatch = csvFirstName === dvFirstName;
             const lastNameMatch = csvLastName === dvLastName;
             const emailMatch = csvEmail === dvEmail;
+            const roleMatch = csvPositionTitle === dvRole;
             const managerGlobalIdMatch = csvManagerGlobalId === dvManagerGlobalId;
             
             // Check if CSV specifies a manager
@@ -453,6 +641,7 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
                 console.log(`      First Name: ${firstNameMatch ? '✅' : '❌'} CSV="${csvFirstName}" DV="${dvFirstName}"`);
                 console.log(`      Last Name:  ${lastNameMatch ? '✅' : '❌'} CSV="${csvLastName}" DV="${dvLastName}"`);
                 console.log(`      Email:      ${emailMatch ? '✅' : '❌'} CSV="${csvEmail}" DV="${dvEmail}"`);
+                console.log(`      Role:       ${roleMatch ? 'OK' : 'NO'} CSV="${csvPositionTitle}" DV="${dvRole}"`);
                 console.log(`      Manager ID: ${managerGlobalIdMatch ? '✅' : '❌'} CSV="${csvManagerGlobalId}" DV="${dvManagerGlobalId}"`);
                 console.log(`   📊 Manager status:`);
                 console.log(`      CSV specifies manager: ${csvHasManager ? 'YES' : 'NO'}`);
@@ -460,7 +649,7 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
             }
             
             // Determine status
-            const allFieldsMatch = firstNameMatch && lastNameMatch && emailMatch && managerGlobalIdMatch;
+            const allFieldsMatch = firstNameMatch && lastNameMatch && emailMatch && roleMatch && managerGlobalIdMatch;
             const managerLookupMissing = csvHasManager && !dvHasManagerLookup;
             
             let status: 'synced' | 'modified' | 'not-synced';
@@ -511,6 +700,13 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
             if (this.csvRecords.length === 0) {
                 void this.context.navigation.openAlertDialog({
                     text: 'No data to synchronize. Please load a file first.',
+                    confirmButtonLabel: "OK"
+                });
+                return { cancelled: true, data: this.csvRecords };
+            }
+            if (!this.csvColumnMap) {
+                void this.context.navigation.openAlertDialog({
+                    text: 'No valid template loaded. Please upload a valid file first.',
                     confirmButtonLabel: "OK"
                 });
                 return { cancelled: true, data: this.csvRecords };
@@ -579,6 +775,13 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
                 });
                 return { cancelled: true, data: this.csvRecords };
             }
+            if (!this.csvColumnMap) {
+                void this.context.navigation.openAlertDialog({
+                    text: 'No valid template loaded. Please upload a valid file first.',
+                    confirmButtonLabel: "OK"
+                });
+                return { cancelled: true, data: this.csvRecords };
+            }
 
             const confirmMessage = `This will update manager relationships for all records.\n\n` +
                 `Make sure you have already synchronized the data using "Synchronize Data" button.\n\n` +
@@ -637,6 +840,12 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
             // Double-check if record already exists (in case of duplicate sync)
             const globalId = getStringValue(record[CSV_COLUMNS.GLOBAL_ID]);
             const existingRecord = this.dataverseRecords.get(globalId);
+
+            if (!hasValue(globalId)) {
+                console.warn('Skipping record without Global ID in create batch.');
+                processedRecords++;
+                continue;
+            }
             
             if (existingRecord) {
                 console.warn(`⚠️ Record ${globalId} already exists. Skipping creation.`);
@@ -650,6 +859,7 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
             const firstName = getStringValue(record[CSV_COLUMNS.FIRST_NAME]);
             const lastName = getStringValue(record[CSV_COLUMNS.LAST_NAME]);
             const email = getStringValue(record[CSV_COLUMNS.EMAIL]);
+            const positionTitle = getStringValue(record[CSV_COLUMNS.POSITION_TITLE]);
             const managerGlobalId = getStringValue(record[CSV_COLUMNS.MANAGER_GLOBAL_ID]);
             
             const data: Record<string, unknown> = {
@@ -658,12 +868,24 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
                 [DV_CONFIG.FIELDS.LAST_NAME]: lastName,
                 [DV_CONFIG.FIELDS.FULL_NAME]: createFullName(firstName, lastName),
                 [DV_CONFIG.FIELDS.EMAIL]: email || null,
+                [DV_CONFIG.FIELDS.ROLE]: positionTitle || null,
                 [DV_CONFIG.FIELDS.MANAGER_GLOBAL_ID]: managerGlobalId || null
             };
 
             try {
                 const result = await this.context.webAPI.createRecord(DV_CONFIG.ENTITY_NAME, data);
                 record.dataverseId = result.id;
+                this.dataverseRecords.set(globalId, {
+                    ag_organizationviewid: result.id,
+                    ag_globalid: globalId,
+                    ag_firstname: firstName,
+                    ag_lastname: lastName,
+                    ag_fullname: createFullName(firstName, lastName),
+                    ag_primaryemail: email,
+                    ag_role: positionTitle,
+                    ag_managerglobalid: managerGlobalId,
+                    ag_managerid: ''
+                });
                 
                 // Status depends on whether manager relationship needs to be set later
                 const csvHasManager = hasValue(managerGlobalId);
@@ -691,6 +913,7 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
             const firstName = getStringValue(record[CSV_COLUMNS.FIRST_NAME]);
             const lastName = getStringValue(record[CSV_COLUMNS.LAST_NAME]);
             const email = getStringValue(record[CSV_COLUMNS.EMAIL]);
+            const positionTitle = getStringValue(record[CSV_COLUMNS.POSITION_TITLE]);
             const managerGlobalId = getStringValue(record[CSV_COLUMNS.MANAGER_GLOBAL_ID]);
             
             const data: Record<string, unknown> = {
@@ -698,6 +921,7 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
                 [DV_CONFIG.FIELDS.LAST_NAME]: lastName,
                 [DV_CONFIG.FIELDS.FULL_NAME]: createFullName(firstName, lastName),
                 [DV_CONFIG.FIELDS.EMAIL]: email || null,
+                [DV_CONFIG.FIELDS.ROLE]: positionTitle || null,
                 [DV_CONFIG.FIELDS.MANAGER_GLOBAL_ID]: managerGlobalId || null
             };
 
@@ -709,6 +933,18 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
                 record.syncStatus = csvHasManager ? 'modified' : 'synced';
                 
                 const globalId = getStringValue(record[CSV_COLUMNS.GLOBAL_ID]);
+                const existingRecord = this.dataverseRecords.get(globalId);
+                this.dataverseRecords.set(globalId, {
+                    ag_organizationviewid: record.dataverseId,
+                    ag_globalid: globalId,
+                    ag_firstname: firstName,
+                    ag_lastname: lastName,
+                    ag_fullname: createFullName(firstName, lastName),
+                    ag_primaryemail: email,
+                    ag_role: positionTitle,
+                    ag_managerglobalid: managerGlobalId,
+                    ag_managerid: existingRecord?.ag_managerid ?? ''
+                });
                 console.log(`✅ Updated: ${globalId} (${firstName} ${lastName})`);
             } catch (error) {
                 const globalId = getStringValue(record[CSV_COLUMNS.GLOBAL_ID]);
@@ -819,33 +1055,29 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
     /**
      * Parse CSV file content
      */
-    private parseCSV(text: string): Record<string, unknown>[] {
-        const lines = text.split('\n').filter(line => line.trim());
-        if (lines.length === 0) return [];
-        
-        // Parse header
-        const headers = lines[0].split(',').map(h => h.trim());
-        
-        // Parse data rows
-        const data: Record<string, unknown>[] = [];
-        for (let i = 1; i < lines.length; i++) {
-            const values = lines[i].split(',');
-            const row: Record<string, unknown> = {};
-            
-            headers.forEach((header, index) => {
-                row[header] = values[index]?.trim() || '';
-            });
-            
-            data.push(row);
+    private parseCSV(text: string): ParseResult {
+        const result = Papa.parse<Record<string, unknown>>(text, {
+            header: true,
+            skipEmptyLines: true,
+            dynamicTyping: false,
+            transformHeader: (header) => header.trim()
+        });
+
+        if (result.errors && result.errors.length > 0) {
+            const firstError = result.errors[0];
+            throw new Error(`CSV parse error at row ${firstError.row ?? 'unknown'}: ${firstError.message}`);
         }
-        
-        return data;
+
+        const headers = (result.meta.fields ?? []).map(header => header.trim()).filter(header => header);
+        const records = result.data.filter((row) => Object.values(row).some(value => hasValue(value)));
+
+        return { records, headers };
     }
 
     /**
      * Parse XLSX/XLS file content
      */
-    private async parseXLSX(file: File): Promise<Record<string, unknown>[]> {
+    private async parseXLSX(file: File): Promise<ParseResult> {
         return new Promise((resolve, reject) => {
             const reader = new FileReader();
             
@@ -864,12 +1096,34 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
                     const firstSheetName = workbook.SheetNames[0];
                     const worksheet = workbook.Sheets[firstSheetName];
                     
-                    // Convert to JSON with header row
-                    const jsonData = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, {
-                        defval: '' // Default value for empty cells
+                    const rows = XLSX.utils.sheet_to_json<unknown[]>(worksheet, {
+                        header: 1,
+                        defval: '',
+                        raw: false
                     });
-                    
-                    resolve(jsonData);
+
+                    if (rows.length === 0) {
+                        resolve({ records: [], headers: [] });
+                        return;
+                    }
+
+                    const headers = rows[0].map(header => getStringValue(header)).filter(header => header);
+                    const records: Record<string, unknown>[] = [];
+
+                    for (let i = 1; i < rows.length; i++) {
+                        const row = rows[i];
+                        if (!row || row.every(value => !hasValue(value))) {
+                            continue;
+                        }
+
+                        const record: Record<string, unknown> = {};
+                        headers.forEach((header, index) => {
+                            record[header] = row[index] ?? '';
+                        });
+                        records.push(record);
+                    }
+
+                    resolve({ records, headers });
                 } catch (error) {
                     reject(error instanceof Error ? error : new Error(String(error)));
                 }
