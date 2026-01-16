@@ -149,6 +149,14 @@ function createFullName(firstName: string, lastName: string): string {
     return `${first} ${last}`.trim();
 }
 
+function normalizeGuid(value: unknown): string {
+    return getStringValue(value).replace(/[{}]/g, '');
+}
+
+function isGuid(value: string): boolean {
+    return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(value);
+}
+
 function buildColumnMap(headers: string[]): ColumnMap {
     const normalizedHeaders = headers.map(header => header.trim());
     const columnMap = {} as ColumnMap;
@@ -480,13 +488,13 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
                 }
                 
                 // Get manager lookup ID - try both field names
-                const managerLookupId = getStringValue(
+                const managerLookupId = normalizeGuid(
                     // eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing, @typescript-eslint/dot-notation
                     entity[DV_CONFIG.FIELDS.MANAGER_LOOKUP_VALUE] || entity['_ag_manager_value']
                 );
                 
                 this.dataverseRecords.set(globalId, {
-                    ag_organizationviewid: getStringValue(entity[DV_CONFIG.FIELDS.ID]),
+                    ag_organizationviewid: normalizeGuid(entity[DV_CONFIG.FIELDS.ID]),
                     ag_globalid: globalId,
                     ag_firstname: getStringValue(entity[DV_CONFIG.FIELDS.FIRST_NAME]),
                     ag_lastname: getStringValue(entity[DV_CONFIG.FIELDS.LAST_NAME]),
@@ -874,9 +882,10 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
 
             try {
                 const result = await this.context.webAPI.createRecord(DV_CONFIG.ENTITY_NAME, data);
-                record.dataverseId = result.id;
+                const createdId = normalizeGuid(result.id);
+                record.dataverseId = createdId;
                 this.dataverseRecords.set(globalId, {
-                    ag_organizationviewid: result.id,
+                    ag_organizationviewid: createdId,
                     ag_globalid: globalId,
                     ag_firstname: firstName,
                     ag_lastname: lastName,
@@ -909,6 +918,7 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
                 continue;
             }
 
+            record.dataverseId = normalizeGuid(record.dataverseId);
             // Prepare data for update
             const firstName = getStringValue(record[CSV_COLUMNS.FIRST_NAME]);
             const lastName = getStringValue(record[CSV_COLUMNS.LAST_NAME]);
@@ -977,6 +987,7 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
             const dvRecord = this.dataverseRecords.get(globalId);
             if (dvRecord) {
                 record.dataverseId = dvRecord.ag_organizationviewid;
+                record.dataverseId = normalizeGuid(record.dataverseId);
             }
         }
 
@@ -1020,14 +1031,23 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
                 continue;
             }
 
+            const recordId = normalizeGuid(record.dataverseId);
+            const managerId = normalizeGuid(managerRecord.ag_organizationviewid);
+            if (!isGuid(recordId) || !isGuid(managerId)) {
+                const globalId = getStringValue(record[CSV_COLUMNS.GLOBAL_ID]);
+                console.warn(`ƒsÿ‹,? Invalid GUIDs for manager update: record ${globalId}, recordId="${recordId}", managerId="${managerId}"`);
+                skipped++;
+                processedRecords++;
+                continue;
+            }
             try {
                 // Set manager lookup using @odata.bind syntax
                 const data = {
                     [`${DV_CONFIG.FIELDS.MANAGER_LOOKUP}@odata.bind`]: 
-                        `/${DV_CONFIG.ENTITY_PLURAL}(${managerRecord.ag_organizationviewid})`
+                        `/${DV_CONFIG.ENTITY_PLURAL}(${managerId})`
                 };
 
-                await this.context.webAPI.updateRecord(DV_CONFIG.ENTITY_NAME, record.dataverseId, data);
+                await this.context.webAPI.updateRecord(DV_CONFIG.ENTITY_NAME, recordId, data);
                 
                 // Now the record is fully synced (including manager relationship)
                 record.syncStatus = 'synced';
