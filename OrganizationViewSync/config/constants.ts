@@ -37,7 +37,8 @@ export const COLUMN_ALIASES: Record<string, string[]> = {
         'manager id',
         'managerid',
         'manager global id',
-        'manager user id'
+        'manager user id',
+        'Manager Global ID'  // Exact case match as fallback
     ],
     [CSV_COLUMNS.MANAGER_NAME]: ['manager', 'manager name', 'reports to'],
     [CSV_COLUMNS.OPERATING_ENTITY]: ['operating entity', 'entity', 'department', 'business unit'],
@@ -68,7 +69,25 @@ export const DV_CONFIG = {
         EMAIL: 'ag_primaryemail',
         MANAGER_GLOBAL_ID: 'ag_managerglobalid',
         MANAGER_LOOKUP: 'ag_manager',
-        MANAGER_LOOKUP_VALUE: '_ag_manager_value'
+        MANAGER_LOOKUP_VALUE: '_ag_manager_value',
+        USER_LOOKUP: 'ag_user',
+        USER_LOOKUP_VALUE: '_ag_user_value',
+        // Lookup field schema names for OData bind operations
+        // IMPORTANT: Use schema name (proper casing), not logical name (lowercase)
+        MANAGER_NAV_PROPERTY: 'ag_Manager',
+        USER_NAV_PROPERTY: 'ag_User'
+    }
+} as const;
+
+/**
+ * Systemuser entity configuration for user lookup
+ */
+export const SYSTEMUSER_CONFIG = {
+    ENTITY_NAME: 'systemuser',
+    ENTITY_PLURAL: 'systemusers',
+    FIELDS: {
+        ID: 'systemuserid',
+        EMAIL: 'internalemailaddress'
     }
 } as const;
 

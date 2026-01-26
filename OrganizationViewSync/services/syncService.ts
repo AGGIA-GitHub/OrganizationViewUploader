@@ -2,7 +2,7 @@
  * Synchronization service for managing data sync between CSV and Dataverse
  */
 
-import { CSV_COLUMNS, DV_CONFIG, BATCH_CONFIG } from '../config/constants';
+import { CSV_COLUMNS, DV_CONFIG, BATCH_CONFIG, SYSTEMUSER_CONFIG } from '../config/constants';
 import { getStringValue, getEmailValue, hasValue, createFullName } from '../utils/helpers';
 import { processBatch, withRetry } from '../utils/batchProcessor';
 import { addToDataverseMap } from './dataverseService';
@@ -82,6 +82,7 @@ export function addSyncStatus(
         const dvEmail = getEmailValue(dvRecord.ag_primaryemail);
         const dvManagerGlobalId = getStringValue(dvRecord.ag_managerglobalid);
         const dvHasManagerLookup = hasValue(dvRecord.ag_managerid);
+        const dvHasUserLookup = hasValue(dvRecord.ag_userid);
 
         // Compare all fields
         const firstNameMatch = csvFirstName === dvFirstName;
@@ -89,6 +90,7 @@ export function addSyncStatus(
         const emailMatch = csvEmail === dvEmail;
         const managerGlobalIdMatch = csvManagerGlobalId === dvManagerGlobalId;
         const csvHasManager = hasValue(csvManagerGlobalId);
+        const csvHasEmail = hasValue(csvEmail);
 
         if (shouldLog) {
             console.log(`   📊 Field comparison:`);
@@ -96,14 +98,17 @@ export function addSyncStatus(
             console.log(`      Last Name:  ${lastNameMatch ? '✅' : '❌'} CSV="${csvLastName}" DV="${dvLastName}"`);
             console.log(`      Email:      ${emailMatch ? '✅' : '❌'} CSV="${csvEmail}" DV="${dvEmail}"`);
             console.log(`      Manager ID: ${managerGlobalIdMatch ? '✅' : '❌'} CSV="${csvManagerGlobalId}" DV="${dvManagerGlobalId}"`);
-            console.log(`   📊 Manager status:`);
+            console.log(`   📊 Lookup status:`);
             console.log(`      CSV specifies manager: ${csvHasManager ? 'YES' : 'NO'}`);
             console.log(`      DV has manager lookup: ${dvHasManagerLookup ? 'YES' : 'NO'}`);
+            console.log(`      CSV has email: ${csvHasEmail ? 'YES' : 'NO'}`);
+            console.log(`      DV has user lookup: ${dvHasUserLookup ? 'YES' : 'NO'}`);
         }
 
         // Determine status
         const allFieldsMatch = firstNameMatch && lastNameMatch && emailMatch && managerGlobalIdMatch;
         const managerLookupMissing = csvHasManager && !dvHasManagerLookup;
+        const userLookupMissing = csvHasEmail && !dvHasUserLookup;
 
         let status: 'synced' | 'modified' | 'not-synced';
 
@@ -115,6 +120,10 @@ export function addSyncStatus(
             status = 'modified';
             modified++;
             if (shouldLog) console.log(`   ⚠️  Status: MODIFIED (Manager lookup relationship not set)`);
+        } else if (userLookupMissing) {
+            status = 'modified';
+            modified++;
+            if (shouldLog) console.log(`   ⚠️  Status: MODIFIED (User lookup relationship not set)`);
         } else {
             status = 'synced';
             synced++;
@@ -296,57 +305,111 @@ export async function syncRecordsWithoutHierarchy(
 }
 
 /**
- * Phase 2: Update manager hierarchy (lookups)
+ * Phase 2: Update lookups (manager and user)
  * Sets the ag_manager lookup relationship based on Manager Global ID
+ * Sets the ag_user lookup relationship based on email matching to systemuser
  * Uses concurrent batching for performance
  */
-export async function syncManagerHierarchy(
+export async function syncLookups(
     csvRecords: EmployeeRecord[],
     dataverseRecords: Map<string, DataverseRecord>,
+    systemUsers: Map<string, string>,
     context: ComponentFramework.Context<unknown>,
     onProgress: ProgressCallback
 ): Promise<HierarchySyncResult> {
-    console.log(`\n📝 Phase 2: Setting manager relationships`);
+    console.log(`\n📝 Phase 2: Setting lookup relationships (manager + user)`);
 
     const errors: string[] = [];
 
-    // Filter records that need manager updates
-    const recordsWithManagers = csvRecords.filter(r => {
+    // Filter records that need lookup updates (either manager or user)
+    const recordsNeedingLookups = csvRecords.filter(r => {
         const managerGlobalId = getStringValue(r[CSV_COLUMNS.MANAGER_GLOBAL_ID]);
-        return hasValue(managerGlobalId) && r.dataverseId;
+        const email = getEmailValue(r[CSV_COLUMNS.EMAIL]);
+        const hasManagerToSet = hasValue(managerGlobalId);
+        const hasEmailToMatch = hasValue(email);
+        return (hasManagerToSet || hasEmailToMatch) && r.dataverseId;
     });
 
-    console.log(`Processing ${recordsWithManagers.length} records with managers...`);
+    console.log(`Processing ${recordsNeedingLookups.length} records for lookup updates...`);
+    console.log(`  - System users available for matching: ${systemUsers.size}`);
 
     let updated = 0;
     let skipped = 0;
 
     const result = await processBatch(
-        recordsWithManagers,
+        recordsNeedingLookups,
         async (record) => {
             const globalId = getStringValue(record[CSV_COLUMNS.GLOBAL_ID]);
             const managerGlobalId = getStringValue(record[CSV_COLUMNS.MANAGER_GLOBAL_ID]);
+            const email = getEmailValue(record[CSV_COLUMNS.EMAIL]);
 
-            // Find manager in Dataverse
-            const managerRecord = dataverseRecords.get(managerGlobalId);
+            // Build update data object
+            const data: Record<string, string> = {};
+            let hasUpdates = false;
+            const updateDetails: string[] = [];
 
-            if (!managerRecord) {
-                console.warn(`⚠️ Manager not found: ${managerGlobalId} for record ${globalId}`);
-                return { action: 'skipped' as const, globalId, reason: 'Manager not found' };
+            // Set manager lookup if manager exists (using navigation property for self-referential lookup)
+            if (hasValue(managerGlobalId)) {
+                const managerRecord = dataverseRecords.get(managerGlobalId);
+                if (managerRecord) {
+                    // Use navigation property name for OData bind (self-referential: fieldname_tablename)
+                    data[`${DV_CONFIG.FIELDS.MANAGER_NAV_PROPERTY}@odata.bind`] =
+                        `/${DV_CONFIG.ENTITY_PLURAL}(${managerRecord.ag_organizationviewid})`;
+                    hasUpdates = true;
+                    updateDetails.push(`manager→${managerGlobalId}`);
+                } else {
+                    console.warn(`⚠️ Manager not found: ${managerGlobalId} for record ${globalId}`);
+                }
             }
 
-            // Set manager lookup using OData bind
-            const data = {
-                [`${DV_CONFIG.FIELDS.MANAGER_LOOKUP}@odata.bind`]:
-                    `/${DV_CONFIG.ENTITY_PLURAL}(${managerRecord.ag_organizationviewid})`
-            };
+            // Set user lookup if email matches a systemuser
+            if (hasValue(email)) {
+                const normalizedEmail = email.toLowerCase().trim();
+                const systemUserId = systemUsers.get(normalizedEmail);
+                if (systemUserId) {
+                    // Use navigation property name for OData bind
+                    data[`${DV_CONFIG.FIELDS.USER_NAV_PROPERTY}@odata.bind`] =
+                        `/${SYSTEMUSER_CONFIG.ENTITY_PLURAL}(${systemUserId})`;
+                    hasUpdates = true;
+                    updateDetails.push(`user→${email}`);
+                } else {
+                    console.warn(`⚠️ No systemuser match for email: "${normalizedEmail}" (record ${globalId})`);
+                    // Check if it's a partial match issue for debugging
+                    const emailPrefix = normalizedEmail.split('@')[0];
+                    if (emailPrefix) {
+                        const partialMatches = Array.from(systemUsers.keys())
+                            .filter(e => e.includes(emailPrefix))
+                            .slice(0, 3);
+                        if (partialMatches.length > 0) {
+                            console.warn(`   Partial matches found: ${partialMatches.join(', ')}`);
+                        }
+                    }
+                }
+            }
 
-            await withRetry(() =>
-                context.webAPI.updateRecord(DV_CONFIG.ENTITY_NAME, record.dataverseId!, data)
-            );
+            // Skip if no updates to make
+            if (!hasUpdates) {
+                return { action: 'skipped' as const, globalId, reason: 'No matching lookups found' };
+            }
 
-            record.syncStatus = 'synced';
-            console.log(`✅ Set manager for ${globalId} → ${managerGlobalId}`);
+            // Log the exact payload being sent for debugging
+            console.log(`📤 Lookup update for ${globalId}:`);
+            console.log(`   Record ID: ${record.dataverseId}`);
+            console.log(`   Payload: ${JSON.stringify(data)}`);
+
+            try {
+                await withRetry(() =>
+                    context.webAPI.updateRecord(DV_CONFIG.ENTITY_NAME, record.dataverseId!, data)
+                );
+
+                record.syncStatus = 'synced';
+                console.log(`✅ Set lookups for ${globalId}: ${updateDetails.join(', ')}`);
+            } catch (error) {
+                // Log full error details for debugging
+                console.error(`❌ Lookup update FAILED for ${globalId}:`);
+                console.error(`   Error: ${error instanceof Error ? error.message : JSON.stringify(error)}`);
+                throw error;
+            }
 
             return { action: 'updated' as const, globalId };
         },
@@ -354,7 +417,7 @@ export async function syncManagerHierarchy(
             concurrency: BATCH_CONFIG.CONCURRENCY,
             onProgress: (completed, total) => {
                 const progress = 20 + Math.round((completed / (total || 1)) * 80);
-                onProgress(progress, `Updating manager relations: ${completed}/${total}`);
+                onProgress(progress, `Updating lookup relations: ${completed}/${total}`);
             }
         }
     );
@@ -362,10 +425,10 @@ export async function syncManagerHierarchy(
     // Process results
     result.results.forEach((res, index) => {
         if (res instanceof Error) {
-            const globalId = getStringValue(recordsWithManagers[index][CSV_COLUMNS.GLOBAL_ID]);
-            errors.push(`Manager update failed for ${globalId}: ${res.message}`);
-            recordsWithManagers[index].syncError = res.message;
-            console.error(`❌ Failed to set manager for ${globalId}:`, res.message);
+            const globalId = getStringValue(recordsNeedingLookups[index][CSV_COLUMNS.GLOBAL_ID]);
+            errors.push(`Lookup update failed for ${globalId}: ${res.message}`);
+            recordsNeedingLookups[index].syncError = res.message;
+            console.error(`❌ Failed to set lookups for ${globalId}:`, res.message);
             skipped++;
         } else if (typeof res === 'object' && res.action === 'skipped') {
             skipped++;
@@ -374,10 +437,11 @@ export async function syncManagerHierarchy(
         }
     });
 
-    // Mark records without managers as synced
+    // Mark records without lookups needed as synced
     csvRecords.forEach(record => {
         const managerGlobalId = getStringValue(record[CSV_COLUMNS.MANAGER_GLOBAL_ID]);
-        if (!hasValue(managerGlobalId) && record.dataverseId && record.syncStatus !== 'error') {
+        const email = getEmailValue(record[CSV_COLUMNS.EMAIL]);
+        if (!hasValue(managerGlobalId) && !hasValue(email) && record.dataverseId && record.syncStatus !== 'error') {
             record.syncStatus = 'synced';
         }
     });
@@ -385,4 +449,17 @@ export async function syncManagerHierarchy(
     console.log(`\n✅ Phase 2 complete: ${updated} updated, ${skipped} skipped, ${errors.length} errors\n`);
 
     return { updated, skipped, errors };
+}
+
+/**
+ * @deprecated Use syncLookups instead - kept for backwards compatibility
+ */
+export async function syncManagerHierarchy(
+    csvRecords: EmployeeRecord[],
+    dataverseRecords: Map<string, DataverseRecord>,
+    context: ComponentFramework.Context<unknown>,
+    onProgress: ProgressCallback
+): Promise<HierarchySyncResult> {
+    // Call syncLookups with empty systemUsers map for backwards compatibility
+    return syncLookups(csvRecords, dataverseRecords, new Map(), context, onProgress);
 }

@@ -15,6 +15,16 @@ export interface DataverseRecord {
     ag_managerglobalid: string;
     /** Lookup ID if manager relationship is set */
     ag_managerid: string;
+    /** Lookup ID if user relationship is set */
+    ag_userid?: string;
+}
+
+/**
+ * Systemuser record structure
+ */
+export interface SystemUser {
+    systemuserid: string;
+    internalemailaddress: string;
 }
 
 /**

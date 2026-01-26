@@ -15,11 +15,11 @@ import { CSV_COLUMNS } from './config/constants';
 import type { DataverseRecord, EmployeeRecord, SyncResult, HierarchySyncResult } from './types';
 
 // Import utilities
-import { parseCSV, deduplicateRecords } from './utils/csvParser';
+import { parseCSV, deduplicateRecords, normalizeColumnNames } from './utils/csvParser';
 
 // Import services
-import { fetchDataverseRecords } from './services/dataverseService';
-import { addSyncStatus, syncRecordsWithoutHierarchy, syncManagerHierarchy } from './services/syncService';
+import { fetchDataverseRecords, fetchSystemUsers } from './services/dataverseService';
+import { addSyncStatus, syncRecordsWithoutHierarchy, syncLookups } from './services/syncService';
 
 /**
  * Main PCF Control Class
@@ -30,6 +30,7 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
     private width: number;
     private height: number;
     private dataverseRecords = new Map<string, DataverseRecord>();
+    private systemUsers = new Map<string, string>();  // email → systemuserid
     private csvRecords: EmployeeRecord[] = [];
 
     constructor() {
@@ -78,13 +79,16 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
             // Parse file based on extension
             const fileName = file.name.toLowerCase();
             const extension = fileName.split('.').pop() ?? '';
-            let data: Record<string, unknown>[];
+            let rawData: Record<string, unknown>[];
 
             if (extension === 'csv') {
                 const text = await file.text();
-                data = parseCSV(text);
+                // parseCSV already normalizes column names
+                rawData = parseCSV(text);
             } else if (extension === 'xlsx' || extension === 'xls') {
-                data = await this.parseXLSX(file);
+                // Parse XLSX and then normalize column names
+                const xlsxData = await this.parseXLSX(file);
+                rawData = normalizeColumnNames(xlsxData);
             } else {
                 void this.context.navigation.openAlertDialog({
                     text: 'Unsupported file format. Please use CSV, XLSX, or XLS.',
@@ -93,7 +97,7 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
                 return [];
             }
 
-            if (data.length === 0) {
+            if (rawData.length === 0) {
                 void this.context.navigation.openAlertDialog({
                     text: 'No data found in file.',
                     confirmButtonLabel: "OK"
@@ -101,11 +105,22 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
                 return [];
             }
 
-            onProgress(40, `Parsed ${data.length} records from file`);
+            onProgress(30, `Parsed ${rawData.length} records from file`);
+
+            // Log sample record to verify column mapping
+            if (rawData.length > 0) {
+                console.log('\n📋 Sample normalized record (first one):');
+                console.log('   Global ID:', rawData[0][CSV_COLUMNS.GLOBAL_ID]);
+                console.log('   First Name:', rawData[0][CSV_COLUMNS.FIRST_NAME]);
+                console.log('   Last Name:', rawData[0][CSV_COLUMNS.LAST_NAME]);
+                console.log('   Email:', rawData[0][CSV_COLUMNS.EMAIL]);
+                console.log('   Manager Global ID:', rawData[0][CSV_COLUMNS.MANAGER_GLOBAL_ID]);
+                console.log('   Manager Name:', rawData[0][CSV_COLUMNS.MANAGER_NAME]);
+            }
 
             // Deduplicate records
             const { records: deduplicatedData, duplicates } = deduplicateRecords(
-                data as EmployeeRecord[],
+                rawData as EmployeeRecord[],
                 CSV_COLUMNS.GLOBAL_ID
             );
 
@@ -113,14 +128,20 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
                 console.warn(`Removed ${duplicates.length} duplicate records`);
             }
 
-            // Fetch existing records from Dataverse
-            onProgress(50, 'Fetching existing records from Dataverse...');
-            await fetchDataverseRecords(this.context, this.dataverseRecords);
+            onProgress(40, `Deduped to ${deduplicatedData.length} unique records`);
 
-            onProgress(70, `Loaded ${this.dataverseRecords.size} records from Dataverse`);
+            // Fetch existing records from Dataverse and system users in parallel
+            onProgress(50, 'Fetching existing records from Dataverse...');
+            const [, systemUsersMap] = await Promise.all([
+                fetchDataverseRecords(this.context, this.dataverseRecords),
+                fetchSystemUsers(this.context)
+            ]);
+            this.systemUsers = systemUsersMap;
+
+            onProgress(70, `Loaded ${this.dataverseRecords.size} org records, ${this.systemUsers.size} system users`);
 
             // Compare and add sync status
-            onProgress(85, 'Comparing data...');
+            onProgress(85, 'Comparing data and preparing for sync...');
             const enrichedData = addSyncStatus(deduplicatedData, this.dataverseRecords);
 
             // Store CSV records for synchronization
@@ -252,13 +273,15 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
                 return { cancelled: true, data: this.csvRecords };
             }
 
-            const confirmMessage = `This will update manager relationships for all records.\n\n` +
+            const confirmMessage = `This will update lookup relationships for all records:\n\n` +
+                `• Manager lookups (ag_manager) - based on Manager Global ID\n` +
+                `• User lookups (ag_user) - based on email matching to systemuser\n\n` +
                 `Make sure you have already synchronized the data using "Synchronize Data" button.\n\n` +
                 `Continue?`;
 
             const confirmResult = await this.context.navigation.openConfirmDialog({
                 text: confirmMessage,
-                title: 'Confirm Manager Hierarchy Update'
+                title: 'Confirm Lookup Update'
             });
 
             if (!confirmResult.confirmed) {
@@ -266,18 +289,19 @@ export class OrganizationViewSync implements ComponentFramework.ReactControl<IIn
             }
 
             // User confirmed - now show progress
-            onProgress(0, 'Starting hierarchy update...');
+            onProgress(0, 'Starting lookup update...');
 
-            // Phase 2: Update manager lookups
-            const hierarchyResult: HierarchySyncResult = await syncManagerHierarchy(
+            // Phase 2: Update lookups (manager + user)
+            const hierarchyResult: HierarchySyncResult = await syncLookups(
                 this.csvRecords,
                 this.dataverseRecords,
+                this.systemUsers,
                 this.context,
                 onProgress
             );
 
             // Build completion message
-            let message = `Manager hierarchy update completed!\n\n`;
+            let message = `Lookup update completed!\n\n`;
             message += `Updated: ${hierarchyResult.updated}\n`;
             message += `Skipped: ${hierarchyResult.skipped}`;
 

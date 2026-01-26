@@ -207,3 +207,55 @@ export function deduplicateRecords<T extends Record<string, unknown>>(
 
     return { records: deduplicated, duplicates };
 }
+
+/**
+ * Normalize raw data (from CSV or XLSX) by applying column mapping
+ * This ensures consistent column names regardless of input format
+ *
+ * @param rawData Array of records with original column names
+ * @returns Array of records with normalized column names matching CSV_COLUMNS
+ */
+export function normalizeColumnNames(rawData: Record<string, unknown>[]): Record<string, unknown>[] {
+    if (rawData.length === 0) return [];
+
+    // Get actual headers from the first record
+    const actualHeaders = Object.keys(rawData[0]);
+
+    // Create column mapping
+    const columnMapping = createColumnMapping(actualHeaders);
+
+    console.log('\n╔════════════════════════════════════════════════════════════════╗');
+    console.log('║  COLUMN MAPPING                                                ║');
+    console.log('╚════════════════════════════════════════════════════════════════╝');
+    console.log('Original headers:', actualHeaders.join(', '));
+    console.log('Mapped columns:', Object.fromEntries(columnMapping));
+
+    // Validate required columns
+    validateRequiredColumns(columnMapping, actualHeaders);
+
+    // Warn about unmapped columns
+    const mappedHeaders = new Set(columnMapping.values());
+    const unmappedHeaders = actualHeaders.filter(h => !mappedHeaders.has(h));
+    if (unmappedHeaders.length > 0) {
+        console.warn(`Unmapped columns (will be preserved): ${unmappedHeaders.join(', ')}`);
+    }
+
+    // Transform each record
+    return rawData.map(record => {
+        const normalizedRecord: Record<string, unknown> = {};
+
+        // Map values to expected column names
+        for (const [expectedCol, actualCol] of columnMapping) {
+            normalizedRecord[expectedCol] = record[actualCol] ?? '';
+        }
+
+        // Also preserve original columns that weren't mapped
+        for (const header of actualHeaders) {
+            if (!mappedHeaders.has(header)) {
+                normalizedRecord[header] = record[header];
+            }
+        }
+
+        return normalizedRecord;
+    });
+}

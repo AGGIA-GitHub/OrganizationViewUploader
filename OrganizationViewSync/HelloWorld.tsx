@@ -4,6 +4,7 @@ import DataGrid, { Column, Scrolling, HeaderFilter, FilterRow, Toolbar, Item, To
 import Button from 'devextreme-react/button';
 import LoadIndicator from 'devextreme-react/load-indicator';
 import ProgressBar from 'devextreme-react/progress-bar';
+import { CSV_COLUMNS } from './config/constants';
 
 export interface IHelloWorldProps {
     onFileUpload: (file: File, onProgress: (progress: number, message: string) => void) => Promise<Record<string, unknown>[]>;
@@ -261,13 +262,13 @@ export class HelloWorld extends React.Component<IHelloWorldProps, IHelloWorldSta
                         width={120}
                         cellRender={this.renderSyncStatus}
                     />
-                    <Column dataField="Global ID" caption="Global ID" width={100} />
-                    <Column dataField="dataverseId" caption="Dataverse ID" width={250} visible={true} />
-                    <Column dataField="First Name" caption="First Name" width={120} />
-                    <Column dataField="Last Name" caption="Last Name" width={120} />
-                    <Column dataField="Business  Email Information Email Address" caption="Email" width={250} />
-                    <Column dataField="Manager" caption="Manager" width={150} />
-                    <Column dataField="Manager User Sys ID" caption="Manager ID" width={100} />
+                    <Column dataField={CSV_COLUMNS.GLOBAL_ID} caption="Global ID" width={100} />
+                    <Column dataField="dataverseId" caption="Dataverse ID" width={280} visible={true} />
+                    <Column dataField={CSV_COLUMNS.FIRST_NAME} caption="First Name" width={120} />
+                    <Column dataField={CSV_COLUMNS.LAST_NAME} caption="Last Name" width={120} />
+                    <Column dataField={CSV_COLUMNS.EMAIL} caption="Email" width={250} />
+                    <Column dataField={CSV_COLUMNS.MANAGER_NAME} caption="Manager" width={150} />
+                    <Column dataField={CSV_COLUMNS.MANAGER_GLOBAL_ID} caption="Manager Global ID" width={150} />
                     <Scrolling mode="virtual" />
                     <FilterRow visible={true} />
                     <HeaderFilter visible={true} />

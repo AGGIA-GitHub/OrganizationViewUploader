@@ -6,6 +6,45 @@ import { BATCH_CONFIG } from '../config/constants';
 import type { BatchResult } from '../types';
 
 /**
+ * Extract a meaningful error message from various error formats
+ * Handles Dataverse WebAPI error responses which may be objects, not Error instances
+ */
+function extractErrorMessage(reason: unknown): Error {
+    if (reason instanceof Error) {
+        return reason;
+    }
+
+    // Handle Dataverse WebAPI error response format
+    if (typeof reason === 'object' && reason !== null) {
+        const obj = reason as Record<string, unknown>;
+
+        // Format: { error: { code: "...", message: "..." } }
+        if (obj.error && typeof obj.error === 'object') {
+            const err = obj.error as Record<string, unknown>;
+            // Safely extract message, preferring string values
+            const message = typeof err.message === 'string' ? err.message
+                : typeof err.code === 'string' ? err.code
+                : JSON.stringify(err);
+            return new Error(message);
+        }
+
+        // Format: { message: "..." }
+        if (typeof obj.message === 'string') {
+            return new Error(obj.message);
+        }
+
+        // Fallback: stringify the object
+        try {
+            return new Error(JSON.stringify(reason));
+        } catch {
+            return new Error('Unknown error (could not serialize)');
+        }
+    }
+
+    return new Error(String(reason));
+}
+
+/**
  * Process items in batches with concurrency control
  * Uses Promise.allSettled to handle partial failures gracefully
  *
@@ -44,9 +83,7 @@ export async function processBatch<T, R>(
                 results.push(result.value);
                 succeeded++;
             } else {
-                const error = result.reason instanceof Error
-                    ? result.reason
-                    : new Error(String(result.reason));
+                const error = extractErrorMessage(result.reason);
                 results.push(error);
                 failed++;
             }
@@ -89,7 +126,7 @@ export async function withRetry<T>(
         try {
             return await operation();
         } catch (error) {
-            lastError = error instanceof Error ? error : new Error(String(error));
+            lastError = extractErrorMessage(error);
 
             // Check if error is retryable
             const errorMessage = lastError.message.toLowerCase();
